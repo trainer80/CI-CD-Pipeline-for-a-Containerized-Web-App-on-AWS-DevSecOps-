@@ -130,7 +130,3 @@ Add screenshots to a `docs/` folder and link them here:
 - Add a Trivy image vulnerability scan stage
 - Remote Terraform state in S3 with locking
 - Add a load balancer and HTTPS
-
-## What I learned
-
-(Write 3-4 lines in your own words: what broke, how you debugged it, what you would do differently.)
