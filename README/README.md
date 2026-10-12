@@ -130,3 +130,4 @@ Add screenshots to a `docs/` folder and link them here:
 - Add a Trivy image vulnerability scan stage
 - Remote Terraform state in S3 with locking
 - Add a load balancer and HTTPS
+
