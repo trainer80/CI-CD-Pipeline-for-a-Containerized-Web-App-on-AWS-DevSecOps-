@@ -1,0 +1,93 @@
+name: CI-CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  IMAGE_NAME: devsecops-flask-app
+
+jobs:
+  # 1) Install dependencies and run unit tests
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+      - name: Run tests
+        run: pytest -v
+
+  # 2) Build the image, run it, and scan it with OWASP ZAP (DevSecOps stage)
+  security-scan:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t $IMAGE_NAME:scan .
+      - name: Start container
+        run: |
+          docker run -d --name target -p 5000:5000 $IMAGE_NAME:scan
+          sleep 8
+          curl --fail http://localhost:5000/health
+      - name: OWASP ZAP baseline scan
+        run: |
+          mkdir -p zap-reports && chmod 777 zap-reports
+          docker run --rm --network host -v "$(pwd)/zap-reports:/zap/wrk:rw" \
+            ghcr.io/zaproxy/zaproxy:stable \
+            zap-baseline.py -t http://localhost:5000 -r zap-report.html -I
+      - name: Upload ZAP report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-report
+          path: zap-reports/zap-report.html
+
+  # 3) Push the image to Docker Hub (only on pushes to main)
+  build-and-push:
+    needs: [test, security-scan]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/devsecops-flask-app:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/devsecops-flask-app:${{ github.sha }}
+
+  # 4) Deploy to the EC2 instance created by Terraform
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy over SSH
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+          IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/devsecops-flask-app:latest
+        run: |
+          echo "$EC2_SSH_KEY" > key.pem && chmod 600 key.pem
+          mkdir -p ~/.ssh && ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts
+          ssh -i key.pem ubuntu@"$EC2_HOST" "
+            sudo docker pull $IMAGE &&
+            (sudo docker rm -f app || true) &&
+            sudo docker run -d --name app --restart unless-stopped -p 80:5000 $IMAGE
+          "
+          rm -f key.pem
+      - name: Smoke test
+        run: |
+          sleep 5
+          curl --fail "http://${{ secrets.EC2_HOST }}/health"
